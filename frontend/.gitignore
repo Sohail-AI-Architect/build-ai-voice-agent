@@ -1,0 +1,4 @@
+# frontend/.gitignore additions
+# Already covered by root .gitignore
+.env
+.env.local

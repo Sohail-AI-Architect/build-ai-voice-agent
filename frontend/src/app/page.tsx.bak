@@ -1,0 +1,2036 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertTriangle, Bell, Plus, Send, X } from "lucide-react";
+import {
+  ApiError,
+  health,
+  listVoices,
+  ttsFallbackInfo,
+} from "@/lib/voice";
+
+type CallStatus = "idle" | "listening" | "thinking" | "speaking" | "stopped";
+
+// Track which status the voice orb shows (independent of the legacy call status).
+type VoiceState = "idle" | "listening" | "speaking" | "stopped";
+type VoiceState = "idle" | "listening" | "speaking" | "stopped";
+
+// Hands-free turn detection.
+const SILENCE_AFTER_SPEECH_MS = 1200;
+const NO_SPEECH_TIMEOUT_MS = 7000;
+const MAX_TURN_MS = 20000;
+const MIN_TURN_BYTES = 800;
+const MIN_SPEECH_RMS = 0.014;
+
+function pickMimeType(): string | undefined {
+  if (typeof MediaRecorder === "undefined") return undefined;
+  if (typeof MediaRecorder.isTypeSupported !== "function") return undefined;
+  return (
+    MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) ||
+    undefined
+  );
+}
+
+function errorMessage(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof Error) return e.message;
+  return "Something went wrong";
+}
+
+function describeMicError(e: unknown): string {
+  if (e instanceof DOMException) {
+    if (e.name === "NotAllowedError" || e.name === "SecurityError") {
+      return (
+        "Microphone permission was denied. Allow mic access in the browser " +
+        "site settings and try again."
+      );
+    }
+    if (e.name === "NotFoundError" || e.name === "DevicesNotFoundError") {
+      return "No microphone was found. Connect a mic and try again.";
+    }
+    if (e.name === "NotReadableError") {
+      return "The microphone is already in use by another app.";
+    }
+  }
+  return `Could not start the microphone: ${errorMessage(e)}`;
+}
+
+// Silent clip used to unlock the shared <audio> element during the user's
+// tap, so replies can auto-play without an autoplay block.
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+
+const MIME_CANDIDATES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/ogg",
+  "audio/mp4",
+  "audio/mpeg",
+];
+
+export default function Home() {
+  const [callActive, setCallActive] = useState(false);
+  const [status, setStatus] = useState<CallStatus>("idle");
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [transcript, setTranscript] = useState("");
+  const [reply, setReply] = useState("");
+  const [mode, setMode] = useState<"assistant" | "teacher">("assistant");
+  const [language, setLanguage] = useState<"en" | "ur" | "auto">("en");
+  const [ttsReady, setTtsReady] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef = useRef<string | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const vadTimerRef = useRef<number | null>(null);
+
+  const activeRef = useRef(false);
+  const stopTurnRef = useRef<(() => void) | null>(null);
+  const finishPlaybackRef = useRef<(() => void) | null>(null);
+
+  const setStatusBoth = useCallback((next: CallStatus) => {
+    setStatus(next);
+  }, []);
+
+  const stopAudio = useCallback(() => {
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    }
+    const audio = audioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute("src");
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, []);
+
+  const stopVad = useCallback(() => {
+    if (vadTimerRef.current !== null) {
+      window.clearInterval(vadTimerRef.current);
+      window.clearTimeout(vadTimerRef.current);
+      vadTimerRef.current = null;
+    }
+  }, []);
+
+  // Shared audio element, unlocked on the user's tap, so later replies can
+  // auto-play without an autoplay block.
+  const unlockAudio = useCallback(async () => {
+    if (typeof window === "undefined") return;
+    if (!audioRef.current) {
+      const audio = new Audio();
+      audio.preload = "auto";
+      audioRef.current = audio;
+    }
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.dataset.unlocked === "1") return;
+    try {
+      audio.src = SILENT_WAV;
+      await audio.play();
+      audio.pause();
+      audio.dataset.unlocked = "1";
+      console.log("[voice] Audio element unlocked for autoplay");
+    } catch (e) {
+      console.warn("[voice] Could not unlock the audio element", e);
+    }
+  }, []);
+
+  const ensureStream = useCallback(async () => {
+    const existing = streamRef.current;
+    if (existing && existing.getAudioTracks().some((track) => track.readyState === "live")) {
+      return existing;
+    }
+
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone access is not available in this browser.");
+    }
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      throw new Error("Microphone access requires HTTPS or http://localhost.");
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    streamRef.current = stream;
+
+    const AudioCtor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioCtor) throw new Error("Web Audio is not supported here.");
+
+    const ctx = audioCtxRef.current ?? new AudioCtor();
+    audioCtxRef.current = ctx;
+    if (ctx.state === "suspended") await ctx.resume();
+
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.6;
+    source.connect(analyser);
+    analyserRef.current = analyser;
+
+    return stream;
+  }, []);
+
+  const releaseMedia = useCallback(() => {
+    stopVad();
+    recorderRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    analyserRef.current = null;
+    const ctx = audioCtxRef.current;
+    audioCtxRef.current = null;
+    if (ctx && ctx.state !== "closed") void ctx.close();
+  }, [stopVad]);
+
+  /**
+   * Record one spoken turn. Resolves with the audio Blob, or null when the
+   * turn was silent, too short, or the call was ended while recording.
+   */
+  const recordTurn = useCallback(async (): Promise<Blob | null> => {
+    const stream = streamRef.current;
+    if (!stream) return null;
+
+    let recorder: MediaRecorder;
+    const mimeType = pickMimeType();
+    try {
+      recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+    } catch (e) {
+      console.warn(`[voice] MediaRecorder rejected "${mimeType}"`, e);
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch (err) {
+        console.error("[voice] MediaRecorder could not start", err);
+        throw new Error("This browser cannot record audio.");
+      }
+    }
+
+    return new Promise<Blob | null>((resolve) => {
+      const chunks: Blob[] = [];
+      let settled = false;
+
+      const finish = (blob: Blob | null) => {
+        if (settled) return;
+        settled = true;
+        stopVad();
+        stopTurnRef.current = null;
+        recorderRef.current = null;
+        resolve(blob);
+      };
+
+      const stopTurn = () => {
+        if (recorder.state === "recording") recorder.stop();
+      };
+      stopTurnRef.current = stopTurn;
+
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) chunks.push(event.data);
+      };
+
+      recorder.onerror = (event) => {
+        console.error("[voice] MediaRecorder error", event);
+        setError("The recorder stopped unexpectedly. Tap the call button to restart.");
+        finish(null);
+      };
+
+      recorder.onstop = () => {
+        const type = recorder.mimeType || chunks[0]?.type || "audio/webm";
+        const blob = new Blob(chunks, { type });
+        console.log(`[voice] Turn finished: ${blob.size} bytes (${type})`);
+
+        if (!activeRef.current) {
+          finish(null);
+          return;
+        }
+        if (blob.size < MIN_TURN_BYTES) {
+          console.log("[voice] Too-short turn, ignoring");
+          finish(null);
+          return;
+        }
+        finish(blob);
+      };
+
+      recorderRef.current = recorder;
+      recorder.start(200);
+      setStatusBoth("listening");
+      console.log(`[voice] Listening (mimeType "${recorder.mimeType || "browser default"}")`);
+
+      // ---- voice activity detection ----
+      stopVad();
+      const analyser = analyserRef.current;
+      if (!analyser) {
+        vadTimerRef.current = window.setTimeout(stopTurn, MAX_TURN_MS);
+        return;
+      }
+
+      const data = new Uint8Array(analyser.fftSize);
+      let speechSeen = false;
+      let lastVoiceAt = performance.now();
+      let baselineSum = 0;
+      let baselineSamples = 0;
+      const startedAt = performance.now();
+
+      vadTimerRef.current = window.setInterval(() => {
+        if (recorder.state !== "recording") {
+          stopVad();
+          return;
+        }
+
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const value = (data[i] - 128) / 128;
+          sum += value * value;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        const now = performance.now();
+
+        if (baselineSamples < 8) {
+          baselineSum += rms;
+          baselineSamples += 1;
+          return;
+        }
+
+        const noiseFloor = baselineSum / baselineSamples;
+        const threshold = Math.max(MIN_SPEECH_RMS, noiseFloor * 2.2);
+
+        if (rms > threshold) {
+          speechSeen = true;
+          lastVoiceAt = now;
+        }
+
+        if (speechSeen && now - lastVoiceAt > SILENCE_AFTER_SPEECH_MS) {
+          console.log("[voice] Silence detected, ending turn");
+          stopTurn();
+        } else if (!speechSeen && now - startedAt > NO_SPEECH_TIMEOUT_MS) {
+          console.log("[voice] No speech detected, listening again");
+          stopTurn();
+        } else if (now - startedAt > MAX_TURN_MS) {
+          console.log("[voice] Max turn length reached");
+          stopTurn();
+        }
+      }, 100);
+    });
+  }, [setStatusBoth, stopVad]);
+
+  const browserSpeakAndWait = useCallback((text: string): Promise<void> => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setError(
+        "ElevenLabs TTS failed and this browser has no speech synthesis fallback."
+      );
+      return Promise.resolve();
+    }
+    window.speechSynthesis.cancel();
+    return new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-US";
+      utterance.rate = 1.05;
+      utterance.onend = finish;
+      utterance.onerror = (event) => {
+        console.error("[voice] Browser speechSynthesis error", event);
+        finish();
+      };
+      window.speechSynthesis.speak(utterance);
+    });
+  }, []);
+
+  /**
+   * Play the ElevenLabs reply and wait for it to finish (autoplay).
+   */
+  const playReply = useCallback(() => {
+    console.log("[voice] playReply called");
+  }, []);
+
+  // ---- the whole call: listen -> reply -> speak -> listen again ----
+  const startCall = useCallback(async () => {
+    if (activeRef.current) return;
+
+    setError(null);
+    setWarning(null);
+    setStatusBoth("listening");
+    setVoiceState("listening");
+
+    activeRef.current = true;
+    setCallActive(true);
+    setTranscript("");
+    setReply("");
+
+    // Unlock here, inside the tap, so every later reply can auto-play.
+    await unlockAudio();
+
+    try {
+      await ensureStream();
+    } catch (e) {
+      console.error("[voice] Could not open the microphone", e);
+      activeRef.current = false;
+      setCallActive(false);
+      setStatusBoth("idle");
+      setVoiceState("stopped");
+      setError(describeMicError(e));
+      return;
+    }
+
+    const conversation: HistoryEntry[] = [];
+    while (activeRef.current) {
+      let blob: Blob | null = null;
+      try {
+        blob = await recordTurn();
+      } catch (e) {
+        console.error("[voice] Recording failed", e);
+        setError(errorMessage(e));
+        break;
+      }
+
+      if (!activeRef.current) break;
+      if (!blob) continue; // silence / tap-to-cancel: keep listening
+
+      setStatusBoth("thinking");
+      setVoiceState("speaking");
+      setError(null);
+
+      try {
+        // ---- transcription + reply (streamed sentence by sentence) ----
+        const base64 = await blobToBase64(blob);
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertTriangle, Bell, Plus, Send, X } from "lucide-react";
+import {
+  ApiError,
+  health,
+  listVoices,
+  ttsFallbackInfo,
+} from "@/lib/voice";
+
+type CallStatus = "idle" | "listening" | "thinking" | "speaking" | "stopped";
+
+// Track which status the voice orb shows (independent of the legacy call status).
+type VoiceState = "idle" | "listening" | "speaking" | "stopped";
+type VoiceState = "idle" | "listening" | "speaking" | "stopped";
+
+// Hands-free turn detection.
+const SILENCE_AFTER_SPEECH_MS = 1200;
+const NO_SPEECH_TIMEOUT_MS = 7000;
+const MAX_TURN_MS = 20000;
+const MIN_TURN_BYTES = 800;
+const MIN_SPEECH_RMS = 0.014;
+
+function pickMimeType(): string | undefined {
+  if (typeof MediaRecorder === "undefined") return undefined;
+  if (typeof MediaRecorder.isTypeSupported !== "function") return undefined;
+  return (
+    MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) ||
+    undefined
+  );
+}
+
+function errorMessage(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof Error) return e.message;
+  return "Something went wrong";
+}
+
+function describeMicError(e: unknown): string {
+  if (e instanceof DOMException) {
+    if (e.name === "NotAllowedError" || e.name === "SecurityError") {
+      return (
+        "Microphone permission was denied. Allow mic access in the browser " +
+        "site settings and try again."
+      );
+    }
+    if (e.name === "NotFoundError" || e.name === "DevicesNotFoundError") {
+      return "No microphone was found. Connect a mic and try again.";
+    }
+    if (e.name === "NotReadableError") {
+      return "The microphone is already in use by another app.";
+    }
+  }
+  return `Could not start the microphone: ${errorMessage(e)}`;
+}
+
+// Silent clip used to unlock the shared <audio> element during the user's
+// tap, so replies can auto-play without an autoplay block.
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+
+const MIME_CANDIDATES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/ogg",
+  "audio/mp4",
+  "audio/mpeg",
+];
+
+export default function Home() {
+  const [callActive, setCallActive] = useState(false);
+  const [status, setStatus] = useState<CallStatus>("idle");
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [transcript, setTranscript] = useState("");
+  const [reply, setReply] = useState("");
+  const [mode, setMode] = useState<"assistant" | "teacher">("assistant");
+  const [language, setLanguage] = useState<"en" | "ur" | "auto">("en");
+  const [ttsReady, setTtsReady] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef = useRef<string | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const vadTimerRef = useRef<number | null>(null);
+
+  const activeRef = useRef(false);
+  const stopTurnRef = useRef<(() => void) | null>(null);
+  const finishPlaybackRef = useRef<(() => void) | null>(null);
+
+  const setStatusBoth = useCallback((next: CallStatus) => {
+    setStatus(next);
+  }, []);
+
+  const stopAudio = useCallback(() => {
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    }
+    const audio = audioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute("src");
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, []);
+
+  const stopVad = useCallback(() => {
+    if (vadTimerRef.current !== null) {
+      window.clearInterval(vadTimerRef.current);
+      window.clearTimeout(vadTimerRef.current);
+      vadTimerRef.current = null;
+    }
+  }, []);
+
+  // Shared audio element, unlocked on the user's tap, so later replies can
+  // auto-play without an autoplay block.
+  const unlockAudio = useCallback(async () => {
+    if (typeof window === "undefined") return;
+    if (!audioRef.current) {
+      const audio = new Audio();
+      audio.preload = "auto";
+      audioRef.current = audio;
+    }
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.dataset.unlocked === "1") return;
+    try {
+      audio.src = SILENT_WAV;
+      await audio.play();
+      audio.pause();
+      audio.dataset.unlocked = "1";
+      console.log("[voice] Audio element unlocked for autoplay");
+    } catch (e) {
+      console.warn("[voice] Could not unlock the audio element", e);
+    }
+  }, []);
+
+  const ensureStream = useCallback(async () => {
+    const existing = streamRef.current;
+    if (existing && existing.getAudioTracks().some((track) => track.readyState === "live")) {
+      return existing;
+    }
+
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone access is not available in this browser.");
+    }
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      throw new Error("Microphone access requires HTTPS or http://localhost.");
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    streamRef.current = stream;
+
+    const AudioCtor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioCtor) throw new Error("Web Audio is not supported here.");
+
+    const ctx = audioCtxRef.current ?? new AudioCtor();
+    audioCtxRef.current = ctx;
+    if (ctx.state === "suspended") await ctx.resume();
+
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.6;
+    source.connect(analyser);
+    analyserRef.current = analyser;
+
+    return stream;
+  }, []);
+
+  const releaseMedia = useCallback(() => {
+    stopVad();
+    recorderRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    analyserRef.current = null;
+    const ctx = audioCtxRef.current;
+    audioCtxRef.current = null;
+    if (ctx && ctx.state !== "closed") void ctx.close();
+  }, [stopVad]);
+
+  /**
+   * Record one spoken turn. Resolves with the audio Blob, or null when the
+   * turn was silent, too short, or the call was ended while recording.
+   */
+  const recordTurn = useCallback(async (): Promise<Blob | null> => {
+    const stream = streamRef.current;
+    if (!stream) return null;
+
+    let recorder: MediaRecorder;
+    const mimeType = pickMimeType();
+    try {
+      recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+    } catch (e) {
+      console.warn(`[voice] MediaRecorder rejected "${mimeType}"`, e);
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch (err) {
+        console.error("[voice] MediaRecorder could not start", err);
+        throw new Error("This browser cannot record audio.");
+      }
+    }
+
+    return new Promise<Blob | null>((resolve) => {
+      const chunks: Blob[] = [];
+      let settled = false;
+
+      const finish = (blob: Blob | null) => {
+        if (settled) return;
+        settled = true;
+        stopVad();
+        stopTurnRef.current = null;
+        recorderRef.current = null;
+        resolve(blob);
+      };
+
+      const stopTurn = () => {
+        if (recorder.state === "recording") recorder.stop();
+      };
+      stopTurnRef.current = stopTurn;
+
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) chunks.push(event.data);
+      };
+
+      recorder.onerror = (event) => {
+        console.error("[voice] MediaRecorder error", event);
+        setError("The recorder stopped unexpectedly. Tap the call button to restart.");
+        finish(null);
+      };
+
+      recorder.onstop = () => {
+        const type = recorder.mimeType || chunks[0]?.type || "audio/webm";
+        const blob = new Blob(chunks, { type });
+        console.log(`[voice] Turn finished: ${blob.size} bytes (${type})`);
+
+        if (!activeRef.current) {
+          finish(null);
+          return;
+        }
+        if (blob.size < MIN_TURN_BYTES) {
+          console.log("[voice] Too-short turn, ignoring");
+          finish(null);
+          return;
+        }
+        finish(blob);
+      };
+
+      recorderRef.current = recorder;
+      recorder.start(200);
+      setStatusBoth("listening");
+      console.log(`[voice] Listening (mimeType "${recorder.mimeType || "browser default"}")`);
+
+      // ---- voice activity detection ----
+      stopVad();
+      const analyser = analyserRef.current;
+      if (!analyser) {
+        vadTimerRef.current = window.setTimeout(stopTurn, MAX_TURN_MS);
+        return;
+      }
+
+      const data = new Uint8Array(analyser.fftSize);
+      let speechSeen = false;
+      let lastVoiceAt = performance.now();
+      let baselineSum = 0;
+      let baselineSamples = 0;
+      const startedAt = performance.now();
+
+      vadTimerRef.current = window.setInterval(() => {
+        if (recorder.state !== "recording") {
+          stopVad();
+          return;
+        }
+
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const value = (data[i] - 128) / 128;
+          sum += value * value;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        const now = performance.now();
+
+        if (baselineSamples < 8) {
+          baselineSum += rms;
+          baselineSamples += 1;
+          return;
+        }
+
+        const noiseFloor = baselineSum / baselineSamples;
+        const threshold = Math.max(MIN_SPEECH_RMS, noiseFloor * 2.2);
+
+        if (rms > threshold) {
+          speechSeen = true;
+          lastVoiceAt = now;
+        }
+
+        if (speechSeen && now - lastVoiceAt > SILENCE_AFTER_SPEECH_MS) {
+          console.log("[voice] Silence detected, ending turn");
+          stopTurn();
+        } else if (!speechSeen && now - startedAt > NO_SPEECH_TIMEOUT_MS) {
+          console.log("[voice] No speech detected, listening again");
+          stopTurn();
+        } else if (now - startedAt > MAX_TURN_MS) {
+          console.log("[voice] Max turn length reached");
+          stopTurn();
+        }
+      }, 100);
+    });
+  }, [setStatusBoth, stopVad]);
+
+  const browserSpeakAndWait = useCallback((text: string): Promise<void> => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setError(
+        "ElevenLabs TTS failed and this browser has no speech synthesis fallback."
+      );
+      return Promise.resolve();
+    }
+    window.speechSynthesis.cancel();
+    return new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-US";
+      utterance.rate = 1.05;
+      utterance.onend = finish;
+      utterance.onerror = (event) => {
+        console.error("[voice] Browser speechSynthesis error", event);
+        finish();
+      };
+      window.speechSynthesis.speak(utterance);
+    });
+  }, []);
+
+  /**
+   * Play the ElevenLabs reply and wait for it to finish (autoplay).
+   */
+  const playReply = useCallback(() => {
+    console.log("[voice] playReply called");
+  }, []);
+
+  // ---- the whole call: listen -> reply -> speak -> listen again ----
+  const startCall = useCallback(async () => {
+    if (activeRef.current) return;
+
+    setError(null);
+    setWarning(null);
+    setStatusBoth("listening");
+    setVoiceState("listening");
+
+    activeRef.current = true;
+    setCallActive(true);
+    setTranscript("");
+    setReply("");
+
+    // Unlock here, inside the tap, so every later reply can auto-play.
+    await unlockAudio();
+
+    try {
+      await ensureStream();
+    } catch (e) {
+      console.error("[voice] Could not open the microphone", e);
+      activeRef.current = false;
+      setCallActive(false);
+      setStatusBoth("idle");
+      setVoiceState("stopped");
+      setError(describeMicError(e));
+      return;
+    }
+
+    const conversation: HistoryEntry[] = [];
+    while (activeRef.current) {
+      let blob: Blob | null = null;
+      try {
+        blob = await recordTurn();
+      } catch (e) {
+        console.error("[voice] Recording failed", e);
+        setError(errorMessage(e));
+        break;
+      }
+
+      if (!activeRef.current) break;
+      if (!blob) continue; // silence / tap-to-cancel: keep listening
+
+      setStatusBoth("thinking");
+      setVoiceState("speaking");
+      setError(null);
+
+      try {
+        // ---- transcription + reply (streamed sentence by sentence) ----
+        const base64 = await blobToBase64(blob);
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/api/voice/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            audio_base64: base64,
+            audio_mime: blob.type || undefined,
+            history: conversation,
+            language,
+            mode,
+            voice_id: undefined,
+          }),
+
+        if (!res.body) {
+          throw new Error("Streaming is not supported in this browser.");
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (activeRef.current) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+        if (!res.body) {
+          throw new Error("Streaming is not supported in this browser.");
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (activeRef.current) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+]
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newline = buffer.indexOf("
+");
+");
+");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            newline = buffer.indexOf("
+");
+");
+");
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                text?: string;
+                audio?: string;
+                error?: string;
+                reply?: string;
+              };
+              switch (event.type) {
+                case "transcript": {
+                  setTranscript(event.text ?? "");
+                  break;
+                }
+                case "sentence": {
+                  console.log("[voice] Sentence received", event.text?.slice(0, 40));
+                  break;
+                }
+                case "done": {
+                  setReply(event.reply ?? "");
+                  break;
+                }
+                case "error": {
+                  throw new Error(event.error ?? "The assistant could not reply.");
+                }
+              }
+            } catch (e) {
+              console.error("[voice] Stream error", e);
+              setError(errorMessage(e));
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[voice] Voice turn failed", e);
+        setError(errorMessage(e));
+      }
+    }
+
+    console.log("[voice] Call loop ended");
+    releaseMedia();
+    stopAudio();
+    setStatusBoth("idle");
+    setVoiceState("stopped");
+];

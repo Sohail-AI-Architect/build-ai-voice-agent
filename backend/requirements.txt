@@ -1,0 +1,29 @@
+# Backend runtime dependencies for the AI Voice Agent.
+# Install with:  cd backend && python -m pip install -r requirements.txt
+# (use the same interpreter that runs uvicorn, e.g. ../.venv/Scripts/python.exe)
+
+# Web framework + ASGI server
+fastapi>=0.110
+# The [standard] extra pulls PyYAML, which has no wheel for Python 3.15 yet.
+# Plain uvicorn still supports --reload (stat-based reloader), so only request
+# the extras on interpreters that can build/install them.
+uvicorn>=0.27
+uvicorn[standard]>=0.27; python_version < "3.15"
+
+# Env loading: python-dotenv reads backend/.env, pydantic-settings for typed config
+python-dotenv>=1.0
+pydantic>=2.5
+pydantic-settings>=2.1
+
+# HTTP client for the ElevenLabs TTS stream
+httpx>=0.26
+
+# Groq client + agents SDK (STT/chat)
+openai-agents>=0.2
+
+# Uploads and async helpers
+python-multipart>=0.0.9
+aiohttp>=3.9
+
+# Legacy loader still used by my_config/gemini_config.py
+python-decouple>=3.8
