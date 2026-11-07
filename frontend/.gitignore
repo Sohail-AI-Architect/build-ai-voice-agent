@@ -2,3 +2,5 @@
 # Already covered by root .gitignore
 .env
 .env.local
+
+.vercel

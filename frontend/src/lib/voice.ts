@@ -1,9 +1,9 @@
-// API helper for the voice agent backend
-const API_URL = (
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"
+const BACKEND_URL = (
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  "https://backend-three-neon-55.vercel.app"
 ).replace(/\/+$/, "");
 
-export const VOICE_API_URL = API_URL;
+export const VOICE_API_URL = BACKEND_URL;
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
@@ -50,9 +50,9 @@ async function request(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const method = init.method ?? "GET";
 
-  console.log(`[voice] -> ${method} ${API_URL}${path}`);
+  console.log(`[voice] -> ${method} ${VOICE_API_URL}${path}`);
   try {
-    const res = await fetch(`${API_URL}${path}`, {
+    const res = await fetch(`${VOICE_API_URL}${path}`, {
       ...init,
       signal: controller.signal,
     });
@@ -76,9 +76,7 @@ async function request(
     }
     console.error(`[voice] Network error on ${path}`, e);
     throw new ApiError(
-      `Cannot reach the backend at ${API_URL}. Is FastAPI running, and is this origin allowed by CORS? (${
-        e instanceof Error ? e.message : "unknown network error"
-      })`,
+      `Cannot reach the backend at ${VOICE_API_URL}. Is FastAPI running, and is this origin allowed by CORS? (${e instanceof Error ? e.message : "unknown network error"})`,
       0,
       "NETWORK"
     );

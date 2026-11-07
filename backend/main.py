@@ -17,7 +17,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("voice-agent")
 
+# CORS allow-list. Defaults to the local development origins; the Vercel
+# frontend is added explicitly so production CORS works without "*"+
+# allow_credentials=True.
 ALLOWED_ORIGINS = allowed_origins()
+_VERCEL_FRONTEND_ORIGIN = settings.vercel_frontend_origin
+if _VERCEL_FRONTEND_ORIGIN not in ALLOWED_ORIGINS:
+    if ALLOWED_ORIGINS == ["*"]:
+        # allow-all already covers everything; append the Vercel origin so the
+        # deploy log can name it and a narrow config can still see it.
+        ALLOWED_ORIGINS = ["*", _VERCEL_FRONTEND_ORIGIN]
+    else:
+        ALLOWED_ORIGINS = list(dict.fromkeys(
+            ALLOWED_ORIGINS + [_VERCEL_FRONTEND_ORIGIN]
+        ))
 
 
 def _log_config_status() -> None:

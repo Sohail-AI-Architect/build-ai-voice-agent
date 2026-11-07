@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Bell, Loader2, Mic, PhoneOff, X } from "lucide-react";
-import { ApiError, VOICE_API_URL, health, ttsFallbackInfo } from "@/lib/voice";
+import {
+  ApiError,
+  VOICE_API_URL,
+  health,
+  ttsFallbackInfo,
+} from "@/lib/voice";
 
 /** Runs only in the browser. Kept in a client component so SSR never sees it. */
 function isBrowser(): boolean {
@@ -253,8 +258,7 @@ export default function Home() {
     if (ctx && ctx.state !== "closed") void ctx.close();
   }, [stopVad]);
 
-  /**
-   * Record one spoken turn. Resolves with the audio Blob, or null when the
+  /** Record one spoken turn. Resolves with the audio Blob, or null when the
    * turn was silent, too short, or the call was ended while recording.
    */
   const recordTurn = useCallback(async (): Promise<Blob | null> => {
@@ -487,7 +491,7 @@ export default function Home() {
 
       const res = await fetch(`${VOICE_API_URL}/api/voice/stream`, {
         method: "POST",
-        headers:{"Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audio_base64: audioBase64,
           audio_mime: blob.type || undefined,
@@ -531,7 +535,8 @@ export default function Home() {
           }
           case "sentence": {
             if (event.text) {
-              turnReply = turnReply ? `${turnReply} ${event.text}` : event.text;
+              turnReply =
+                turnReply ? `${turnReply} ${event.text}` : event.text;
               setReply(turnReply);
             }
             if (event.audio) {

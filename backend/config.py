@@ -149,6 +149,7 @@ class Settings:
 
     frontend_origins: tuple[str, ...]
     cors_allow_all_origins: bool
+    vercel_frontend_origin: str
 
     @property
     def groq_configured(self) -> bool:
@@ -190,9 +191,15 @@ def _load_settings() -> Settings:
         port=_env_int("PORT", 8000),
         reload=_env_bool("RELOAD", False),
         frontend_origins=origins,
-        # Local development defaults to allow-all (the requested behaviour).
-        # Set CORS_ALLOW_ALL_ORIGINS=false to lock CORS down to localhost.
-        cors_allow_all_origins=_env_bool("CORS_ALLOW_ALL_ORIGINS", True),
+        # The production Vercel frontend. main.py appends this to the CORS
+        # allow-list, so it works even when the explicit list is used.
+        vercel_frontend_origin=_env(
+            "VERCEL_FRONTEND_ORIGIN", "https://frontend-two-flame-37.vercel.app"
+        ),
+        # Explicit allow-list by default: the Vercel frontend plus the local
+        # development origins. Set CORS_ALLOW_ALL_ORIGINS=true (or
+        # FRONTEND_ORIGINS=*) only if you really need every origin.
+        cors_allow_all_origins=_env_bool("CORS_ALLOW_ALL_ORIGINS", False),
     )
 
 
@@ -222,7 +229,9 @@ DEFAULT_FRONTEND_ORIGINS: tuple[str, ...] = (
 def allowed_origins() -> list[str]:
     """Return the CORS origin list.
 
-    ``CORS_ALLOW_ALL_ORIGINS=true`` (or ``FRONTEND_ORIGINS=*``) yields ``["*"]``.
+    By default this is the explicit allow-list: the local development origins
+    plus any ``FRONTEND_ORIGINS`` (and the Vercel frontend, added by main.py).
+    ``CORS_ALLOW_ALL_ORIGINS=true`` (or ``FRONTEND_ORIGINS=*``) yields ``["*"]``;
     Starlette mirrors the request Origin when ``*`` is combined with
     ``allow_credentials=True``, because browsers reject a literal ``*`` on
     credentialed responses.
