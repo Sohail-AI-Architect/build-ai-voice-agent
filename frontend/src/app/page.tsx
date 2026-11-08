@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, Bell, X } from "lucide-react";
+import { AlertTriangle, AudioLines, Bell, X } from "lucide-react";
 import {
   ApiError,
   VOICE_API_URL,
@@ -10,20 +10,30 @@ import {
 } from "@/lib/voice";
 
 import { Header } from "@/components/layout/Header";
-import { VoiceOrb } from "@/components/voice/VoiceOrb";
-import { ConversationPanel } from "@/components/voice/ConversationPanel";
-import { StatusIndicator } from "@/components/voice/StatusIndicator";
+import { VoiceOrb, type VoiceState } from "@/components/voice/VoiceOrb";
+import {
+  StatusIndicator,
+  type CallStatus,
+} from "@/components/voice/StatusIndicator";
+import {
+  ConversationPanel,
+  type ConversationEntry,
+} from "@/components/voice/ConversationPanel";
+import {
+  AgentStatusCard,
+  BackendConnectionCard,
+  ConversationStatsCard,
+  LiveTextCards,
+  SelectedVoiceCard,
+  SessionInfoCard,
+} from "@/components/dashboard/StatCards";
 
 /** Runs only in the browser. Kept in a client component so SSR never sees it. */
 function isBrowser(): boolean {
   return typeof window !== "undefined";
 }
-type CallStatus = "idle" | "listening" | "thinking" | "speaking" | "stopped";
 
-// Track which status the voice orb shows (independent of the legacy call status).
-type VoiceState = "idle" | "listening" | "processing" | "speaking" | "stopped";
-
-type HistoryEntry = { role: "user" | "agent"; content: string };
+type HistoryEntry = { role: "user" | "agent"; content: string; at?: number };
 
 // One newline-delimited JSON event from /api/voice/stream.
 type StreamEvent = {
@@ -58,14 +68,13 @@ const MIME_CANDIDATES = [
 const SILENT_WAV =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
 
-const STATUS_LABEL: Record<CallStatus, string> = {
-  idle: "Tap to start",
-  listening: "Listening…",
-  thinking: "Thinking…",
-  speaking: "Speaking…",
-  stopped: "Call ended",
+const INSTRUCTION: Record<CallStatus, string> = {
+  idle: "Tap the orb to start a live voice session. Allow microphone access when prompted.",
+  listening: "Listening… speak naturally, then pause briefly to send your turn.",
+  thinking: "Processing your speech and generating a reply…",
+  speaking: "The assistant is speaking. It will listen again automatically.",
+  stopped: "Session ended. Tap the orb to start a new conversation.",
 };
-
 
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
@@ -115,6 +124,8 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+const BACKEND_HOST = VOICE_API_URL.replace(/^https?:\/\//, "");
+
 export default function Home() {
   const [callActive, setCallActive] = useState(false);
   const [status, setStatus] = useState<CallStatus>("idle");
@@ -122,9 +133,19 @@ export default function Home() {
   const [transcript, setTranscript] = useState("");
   const [reply, setReply] = useState("");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [mode, setMode] = useState("assistant");
+  const [mode] = useState("assistant");
   const [ttsReady, setTtsReady] = useState<boolean | null>(null);
   const [backendOnline, setBackendOnline] = useState(false);
+  const [backendLatency, setBackendLatency] = useState<number | null>(null);
+  const [voiceInfo, setVoiceInfo] = useState<{
+    voice_id: string;
+    model_id: string;
+    has_key: boolean;
+  } | null>(null);
+  const [warningCount, setWarningCount] = useState(0);
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
+  const [sessionDurationMs, setSessionDurationMs] = useState(0);
+  const [lastReplyMs, setLastReplyMs] = useState<number | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -484,8 +505,14 @@ export default function Home() {
     async (
       blob: Blob,
       conversation: HistoryEntry[]
-    ): Promise<{ transcript: string; reply: string }> => {
+    ): Promise<{
+      transcript: string;
+      reply: string;
+      transcriptAt: number | null;
+      replyAt: number | null;
+    }> => {
       const audioBase64 = await blobToBase64(blob);
+      const turnStartedAt = performance.now();
 
       const res = await fetch(`${VOICE_API_URL}/api/voice/stream`, {
         method: "POST",
@@ -493,7 +520,8 @@ export default function Home() {
         body: JSON.stringify({
           audio_base64: audioBase64,
           audio_mime: blob.type || undefined,
-          history: conversation,
+          // Timestamps are display-only and stay out of the API contract.
+          history: conversation.map(({ role, content }) => ({ role, content })),
           // Auto-detect: the backend reads the transcript, picks the English or
           // Urdu prompt and the matching ElevenLabs model, and reports the
           // result in the "transcript" event.
@@ -519,6 +547,9 @@ export default function Home() {
       let turnTranscript = "";
       let turnReply = "";
       let fallbackText = "";
+      let transcriptAt: number | null = null;
+      let replyAt: number | null = null;
+      let firstSentenceMs: number | null = null;
 
       const handleLine = (line: string) => {
         const event = JSON.parse(line) as StreamEvent;
@@ -526,6 +557,7 @@ export default function Home() {
           case "transcript": {
             turnTranscript = event.text ?? "";
             setTranscript(turnTranscript);
+            if (transcriptAt === null) transcriptAt = Date.now();
             if (event.language === "en" || event.language === "ur") {
               replyLanguageRef.current = event.language;
             }
@@ -533,8 +565,14 @@ export default function Home() {
           }
           case "sentence": {
             if (event.text) {
-              turnReply =
-                turnReply ? `${turnReply} ${event.text}` : event.text;
+              if (replyAt === null) replyAt = Date.now();
+              if (firstSentenceMs === null) {
+                firstSentenceMs = Math.round(performance.now() - turnStartedAt);
+                setLastReplyMs(firstSentenceMs);
+              }
+              turnReply = turnReply
+                ? `${turnReply} ${event.text}`
+                : event.text;
               setReply(turnReply);
             }
             if (event.audio) {
@@ -548,6 +586,7 @@ export default function Home() {
           case "done": {
             turnReply = event.reply ?? turnReply;
             setReply(turnReply);
+            if (turnReply && replyAt === null) replyAt = Date.now();
             break;
           }
           case "error": {
@@ -580,7 +619,7 @@ export default function Home() {
       await waitForPlayback();
       if (fallbackText) await browserSpeakAndWait(fallbackText);
 
-      return { transcript: turnTranscript, reply: turnReply };
+      return { transcript: turnTranscript, reply: turnReply, transcriptAt, replyAt };
     },
     [browserSpeakAndWait, enqueueSentenceAudio, mode, waitForPlayback]
   );
@@ -599,6 +638,9 @@ export default function Home() {
     setTranscript("");
     setReply("");
     setHistory([]);
+    setLastReplyMs(null);
+    setSessionStartedAt(Date.now());
+    setSessionDurationMs(0);
 
     // Unlock here, inside the tap, so every later reply can auto-play.
     await unlockAudio();
@@ -636,15 +678,27 @@ export default function Home() {
 
         try {
           const turn = await runVoiceTurn(blob, conversation);
+          setBackendOnline(true);
           if (turn.transcript) {
-            conversation.push({ role: "user", content: turn.transcript });
+            conversation.push({
+              role: "user",
+              content: turn.transcript,
+              at: turn.transcriptAt ?? Date.now(),
+            });
           }
           if (turn.reply) {
-            conversation.push({ role: "agent", content: turn.reply });
+            conversation.push({
+              role: "agent",
+              content: turn.reply,
+              at: turn.replyAt ?? Date.now(),
+            });
           }
           setHistory([...conversation]);
         } catch (e) {
           console.error("[voice] Voice turn failed", e);
+          if (e instanceof ApiError && e.status === 0) {
+            setBackendOnline(false);
+          }
           setError(errorMessage(e));
         }
 
@@ -680,26 +734,49 @@ export default function Home() {
     setCallActive(false);
   }, [stopAudio]);
 
-  // Report TTS availability and any backend configuration warnings once.
+  // Report TTS availability and any backend configuration warnings once,
+  // timing the health request so the connection card shows a real latency.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const [report, info] = await Promise.all([health(), ttsFallbackInfo()]);
+        const startedAt = performance.now();
+        const report = await health();
+        const latency = Math.round(performance.now() - startedAt);
+        const info = await ttsFallbackInfo();
         if (cancelled) return;
         setBackendOnline(true);
+        setBackendLatency(latency);
+        setVoiceInfo({
+          voice_id: info.voice_id,
+          model_id: info.model_id,
+          has_key: info.has_key,
+        });
         setTtsReady(Boolean(report.elevenlabs_configured && info.has_key));
         const warnings = report.warnings ?? [];
+        setWarningCount(warnings.length);
         if (warnings.length > 0) setWarning(warnings[0]);
       } catch (e) {
         console.error("[voice] Health check failed", e);
+        if (cancelled) return;
         setBackendOnline(false);
+        setBackendLatency(null);
+        setTtsReady(false);
       }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Session clock: ticks only while a call is running.
+  useEffect(() => {
+    if (!callActive || sessionStartedAt === null) return;
+    const id = window.setInterval(() => {
+      setSessionDurationMs(Date.now() - sessionStartedAt);
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [callActive, sessionStartedAt]);
 
   // Release the microphone and audio element when leaving the page.
   useEffect(() => {
@@ -714,97 +791,202 @@ export default function Home() {
   // Real, ordered conversation for the panel: all completed turns plus the
   // turn that is currently being processed.
   const inFlight = status === "thinking" || status === "speaking";
-  const conversationEntries: { speaker: "user" | "agent"; text: string }[] = [
-    ...history.map((entry) => ({ speaker: entry.role, text: entry.content })),
+  const conversationEntries: ConversationEntry[] = [
+    ...history.map((entry) => ({
+      speaker: entry.role,
+      text: entry.content,
+      at: entry.at,
+    })),
     ...(inFlight && transcript
       ? [{ speaker: "user" as const, text: transcript }]
       : []),
     ...(inFlight && reply ? [{ speaker: "agent" as const, text: reply }] : []),
   ];
 
+  const turns = history.filter((entry) => entry.role === "agent").length;
+  const instruction = INSTRUCTION[status];
+
   return (
-    <div className="flex min-h-full flex-col bg-neutral-50 dark:bg-neutral-950">
-      <Header
-        demoReady={ttsReady === true}
-        connectivity={backendOnline}
-      />
+    <div className="flex min-h-full flex-col">
+      <Header demoReady={ttsReady === true} connectivity={backendOnline} />
 
-      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-5 px-4 py-8 sm:gap-6 sm:px-6 sm:py-10">
-        {error && (
-          <div
-            role="alert"
-            className="flex items-start gap-3 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
-          >
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-            <p className="flex-1">{error}</p>
-            <button
-              type="button"
-              onClick={() => setError(null)}
-              aria-label="Dismiss error"
-              className="rounded p-0.5 hover:bg-red-500/10"
-            >
-              <X className="h-4 w-4" aria-hidden />
-            </button>
+      <main className="mx-auto w-full max-w-7xl flex-1 px-4 pt-6 pb-10 sm:px-6 sm:pt-8 lg:px-8">
+        {(error || warning) && (
+          <div className="mb-5 flex flex-col gap-3">
+            {error && (
+              <div
+                role="alert"
+                className="flex items-start gap-3 rounded-xl border border-red-400/25 bg-red-500/10 p-3.5 text-sm text-red-200"
+              >
+                <AlertTriangle
+                  className="mt-0.5 h-4 w-4 shrink-0"
+                  aria-hidden="true"
+                />
+                <p className="flex-1 leading-relaxed">{error}</p>
+                <button
+                  type="button"
+                  onClick={() => setError(null)}
+                  aria-label="Dismiss error"
+                  className="rounded-md p-1 transition-colors hover:bg-red-500/15 focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:outline-none"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            )}
+
+            {warning && (
+              <div
+                role="status"
+                className="flex items-start gap-3 rounded-xl border border-amber-400/25 bg-amber-400/10 p-3.5 text-sm text-amber-200"
+              >
+                <Bell
+                  className="mt-0.5 h-4 w-4 shrink-0"
+                  aria-hidden="true"
+                />
+                <p className="flex-1 leading-relaxed">{warning}</p>
+                <button
+                  type="button"
+                  onClick={() => setWarning(null)}
+                  aria-label="Dismiss warning"
+                  className="rounded-md p-1 transition-colors hover:bg-amber-400/15 focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:outline-none"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            )}
           </div>
         )}
 
-        {warning && (
-          <div
-            role="status"
-            className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+        <div className="grid gap-5 lg:grid-cols-12 lg:items-start lg:gap-6">
+          {/* Voice console */}
+          <section
+            id="console"
+            aria-labelledby="console-heading"
+            className="order-1 scroll-mt-28 lg:col-span-5 lg:col-start-1 lg:row-start-1"
           >
-            <Bell className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-            <p className="flex-1">{warning}</p>
-            <button
-              type="button"
-              onClick={() => setWarning(null)}
-              aria-label="Dismiss warning"
-              className="rounded p-0.5 hover:bg-amber-500/10"
-            >
-              <X className="h-4 w-4" aria-hidden />
-            </button>
+            <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-ink-850/70 shadow-[0_24px_70px_-30px_rgba(0,0,0,0.95)] backdrop-blur-sm">
+              <div className="flex items-center justify-between gap-3 border-b border-white/[0.07] px-4 py-3 sm:px-5">
+                <div className="flex items-center gap-2.5">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-brand-300">
+                    <AudioLines className="h-4 w-4" aria-hidden="true" />
+                  </span>
+                  <div>
+                    <h2
+                      id="console-heading"
+                      className="text-sm font-semibold text-slate-100"
+                    >
+                      Voice Console
+                    </h2>
+                    <p className="text-[11px] text-slate-400">
+                      Groq reasoning · ElevenLabs speech
+                    </p>
+                  </div>
+                </div>
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                    callActive
+                      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
+                      : "border-white/10 bg-white/[0.04] text-slate-500"
+                  }`}
+                >
+                  {callActive ? "Live" : "Idle"}
+                </span>
+              </div>
+
+              <div className="flex flex-1 flex-col items-center gap-4 px-4 py-7 sm:px-6 sm:py-8">
+                <VoiceOrb
+                  state={voiceState}
+                  callActive={callActive}
+                  onToggle={() => {
+                    if (callActive) {
+                      endCall();
+                    } else {
+                      void startCall();
+                    }
+                  }}
+                />
+
+                <p
+                  className="max-w-sm text-center text-sm leading-relaxed text-slate-400"
+                  aria-live="polite"
+                >
+                  {instruction}
+                </p>
+
+                <StatusIndicator
+                  status={status}
+                  voiceState={voiceState}
+                  callActive={callActive}
+                  onStart={() => void startCall()}
+                  onEnd={endCall}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Conversation workspace */}
+          <div className="order-2 flex min-w-0 flex-col lg:col-span-7 lg:col-start-6 lg:row-start-1">
+            <ConversationPanel
+              entries={conversationEntries}
+              className="min-h-[22rem] lg:min-h-[31.5rem]"
+            />
           </div>
-        )}
 
-        <section className="flex flex-col items-center gap-4 rounded-2xl border border-neutral-200 bg-white/70 px-4 py-6 dark:border-neutral-800 dark:bg-neutral-900/60">
-          <VoiceOrb
-            state={voiceState}
-            hint={callActive ? STATUS_LABEL[status] : "Tap to start"}
-          />
-          <StatusIndicator
-            status={status}
-            voiceState={voiceState}
-            callActive={callActive}
-            onStart={() => void startCall()}
-            onEnd={endCall}
-          />
-        </section>
+          {/* Real-data cards */}
+          <div
+            id="insights"
+            className="order-4 grid scroll-mt-28 gap-4 sm:grid-cols-2 lg:col-span-12 lg:col-start-1 lg:row-start-2 lg:grid-cols-4"
+          >
+            <BackendConnectionCard
+              online={backendOnline}
+              latencyMs={backendLatency}
+              host={BACKEND_HOST}
+              warningCount={warningCount}
+            />
+            <AgentStatusCard status={status} callActive={callActive} />
+            <SelectedVoiceCard
+              voiceId={voiceInfo?.voice_id ?? null}
+              modelId={voiceInfo?.model_id ?? null}
+              configured={Boolean(voiceInfo?.has_key)}
+            />
+            <ConversationStatsCard
+              turns={turns}
+              messages={history.length}
+              lastReplyMs={lastReplyMs}
+            />
+          </div>
 
-        <ConversationPanel
-          entries={conversationEntries}
-          className="max-h-80 min-h-40 rounded-2xl border border-neutral-200 bg-white/70 dark:border-neutral-800 dark:bg-neutral-900/60"
-        />
+          {/* Live turn text */}
+          <div className="order-3 flex flex-col lg:col-span-8 lg:col-start-1 lg:row-start-3 lg:self-stretch">
+            <LiveTextCards
+              transcript={transcript}
+              reply={reply}
+              callActive={callActive}
+            />
+          </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {["assistant"].map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setMode(option)}
-              disabled={callActive}
-              aria-pressed={mode === option}
-              className={`rounded-full border px-3 py-1.5 text-sm capitalize transition disabled:opacity-50 ${
-                mode === option
-                  ? "border-neutral-900 bg-neutral-900 text-white dark:border-white dark:bg-white dark:text-neutral-900"
-                  : "border-neutral-300 text-neutral-600 hover:border-neutral-400 dark:border-neutral-700 dark:text-neutral-300"
-              }`}
-            >
-              {option}
-            </button>
-          ))}
+          {/* Session details */}
+          <div className="order-5 lg:col-span-4 lg:col-start-9 lg:row-start-3">
+            <SessionInfoCard
+              status={status}
+              startedAt={sessionStartedAt}
+              durationMs={sessionDurationMs}
+              turns={turns}
+              host={BACKEND_HOST}
+            />
+          </div>
         </div>
-
       </main>
+
+      <footer className="border-t border-white/[0.07]">
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-1.5 px-4 py-6 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+          <p>
+            AI Voice Studio · Real-time speech recognition, streaming replies and
+            spoken audio.
+          </p>
+          <p className="font-mono text-[11px] text-slate-600">{BACKEND_HOST}</p>
+        </div>
+      </footer>
     </div>
   );
 }

@@ -1,74 +1,154 @@
+"use client";
+
+import { useEffect, useRef } from "react";
+import { MessagesSquare, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type Speaker = "user" | "agent";
+
+export type ConversationEntry = {
+  speaker: Speaker;
+  text: string;
+  /** Real timestamp recorded when the message was received, if available. */
+  at?: number;
+};
+
+const timeFormatter = new Intl.DateTimeFormat("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function formatTime(timestamp: number): string {
+  return timeFormatter.format(new Date(timestamp));
+}
 
 export function ConversationPanel({
   entries,
   className,
 }: {
-  entries: { speaker: Speaker; text: string }[];
+  entries: ConversationEntry[];
   className?: string;
 }) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const lastText = entries.length > 0 ? entries[entries.length - 1].text : "";
+  const lastLength = entries.length;
+
+  // Keep the newest message visible without scrolling the whole page.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [lastLength, lastText]);
+
+  const turns = entries.filter((entry) => entry.speaker === "agent").length;
+
   return (
-    <div
+    <section
+      id="conversation"
+      aria-labelledby="conversation-heading"
       className={cn(
-        "flex flex-col gap-3 overflow-y-auto px-4 py-3 sm:px-5",
+        "flex scroll-mt-24 flex-col overflow-hidden rounded-2xl border border-white/10 bg-ink-850/70",
+        "shadow-[0_18px_50px_-24px_rgba(0,0,0,0.9)] backdrop-blur-sm",
         className,
       )}
-      role="log"
-      aria-label="Conversation"
-      aria-live="polite"
     >
-      {entries.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-8 text-center">
-          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-neutral-100 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-500">
-            <svg
-              className="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              aria-hidden="true"
+      <div className="flex items-center justify-between gap-3 border-b border-white/[0.07] px-4 py-3 sm:px-5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-brand-300">
+            <MessagesSquare className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <h2
+              id="conversation-heading"
+              className="truncate text-sm font-semibold text-slate-100"
             >
-              <path
-                d="M8 10h8M8 14h5"
-                strokeLinecap="round"
-              />
-              <circle cx="12" cy="10" r="3" stroke="#e8a0d0" strokeWidth="1.5" />
-              <circle cx="18" cy="14" r="2" stroke="#a0d0e8" strokeWidth="1.5" />
-            </svg>
+              Conversation
+            </h2>
+            <p className="truncate text-[11px] text-slate-400">
+              Live transcript for this session
+            </p>
           </div>
-          <p className="mt-3 text-sm text-neutral-500 dark:text-neutral-400">
-            Your conversation will appear here
-          </p>
-          <p className="text-xs text-neutral-400 dark:text-neutral-500">
-            Tap the mic and say hello to get started
-          </p>
         </div>
-      ) : (
-        entries.map((entry, index) => (
-          <div
-            key={index}
-            className={cn(
-              "flex gap-3 sm:gap-4",
-              entry.speaker === "user"
-                ? "justify-end"
-                : "justify-start",
-            )}
-          >
-            <div
-              className={cn(
-                "max-w-[80%] sm:max-w-[70%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm",
-                entry.speaker === "user"
-                  ? "bg-gradient-to-br from-neutral-900 to-neutral-800 text-white rounded-br-sm"
-                  : "bg-white/80 text-neutral-800 border border-neutral-200 rounded-bl-sm dark:bg-neutral-800/70 dark:text-neutral-100 dark:border-neutral-700",
-              )}
-            >
-              {entry.text}
+        <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          {turns} {turns === 1 ? "reply" : "replies"}
+        </span>
+      </div>
+
+      <div
+        ref={bodyRef}
+        role="log"
+        aria-live="polite"
+        aria-label="Conversation messages"
+        className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-5"
+      >
+        {entries.length === 0 ? (
+          <div className="flex h-full min-h-40 flex-col items-center justify-center px-4 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-slate-500">
+              <Sparkles className="h-5 w-5" aria-hidden="true" />
             </div>
+            <p className="mt-4 text-sm font-medium text-slate-300">
+              No conversation yet
+            </p>
+            <p className="mt-1 max-w-xs text-xs leading-relaxed text-slate-500">
+              Start a call and speak — your words and the assistant reply will
+              appear here in real time.
+            </p>
           </div>
-        ))
-      )}
-    </div>
+        ) : (
+          entries.map((entry, index) => {
+            const isUser = entry.speaker === "user";
+            return (
+              <article
+                key={`${entry.speaker}-${index}`}
+                className={cn(
+                  "animate-fade-up flex items-start gap-3",
+                  isUser ? "flex-row-reverse" : "flex-row",
+                )}
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
+                    isUser
+                      ? "bg-white/[0.06] text-slate-300 ring-1 ring-white/10"
+                      : "bg-gradient-to-br from-brand-500 to-cyan-500 text-white shadow-sm shadow-brand-700/40",
+                  )}
+                >
+                  {isUser ? "YOU" : <Sparkles className="h-3.5 w-3.5" />}
+                </span>
+
+                <div
+                  className={cn(
+                    "flex min-w-0 max-w-[85%] flex-col gap-1 sm:max-w-[78%]",
+                    isUser ? "items-end" : "items-start",
+                  )}
+                >
+                  <div className="flex items-center gap-2 px-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                      {isUser ? "You" : "Assistant"}
+                    </span>
+                    {typeof entry.at === "number" && (
+                      <span className="text-[10px] text-slate-600">
+                        {formatTime(entry.at)}
+                      </span>
+                    )}
+                  </div>
+                  <p
+                    className={cn(
+                      "rounded-2xl px-4 py-2.5 text-sm leading-relaxed break-words whitespace-pre-wrap",
+                      isUser
+                        ? "rounded-tr-sm border border-brand-400/25 bg-brand-500/15 text-slate-100"
+                        : "rounded-tl-sm border border-white/10 bg-white/[0.045] text-slate-200",
+                    )}
+                  >
+                    {entry.text}
+                  </p>
+                </div>
+              </article>
+            );
+          })
+        )}
+      </div>
+    </section>
   );
 }

@@ -1,37 +1,161 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  /* Deep navy surfaces */
+  --color-ink-950: #05080f;
+  --color-ink-900: #070b14;
+  --color-ink-850: #0a0f1b;
+  --color-ink-800: #0d1422;
+  --color-ink-700: #131b2c;
+  --color-ink-600: #1b2436;
+
+  /* Violet brand accent */
+  --color-brand-200: #cdc6ff;
+  --color-brand-300: #b4a9ff;
+  --color-brand-400: #9c8fff;
+  --color-brand-500: #7c6cff;
+  --color-brand-600: #6350f5;
+  --color-brand-700: #4f3ed6;
+
+  --animate-orb-breathe: orb-breathe 5s ease-in-out infinite;
+  --animate-ring-pulse: ring-pulse 2.8s ease-out infinite;
+  --animate-wave: wave 1.1s ease-in-out infinite;
+  --animate-fade-up: fade-up 0.4s ease-out both;
+  --animate-spin-slow: spin-slow 3.5s linear infinite;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
 }
 
-@theme {
-  /* Brand accent used by the voice UI components. */
-  --color-brand-50: #eef2ff;
-  --color-brand-100: #e0e7ff;
-  --color-brand-300: #a5b4fc;
-  --color-brand-400: #818cf8;
-  --color-brand-500: #6366f1;
-  --color-brand-600: #4f46e5;
-  --color-brand-700: #4338ca;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@keyframes orb-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.07);
+    opacity: 0.85;
   }
 }
 
+@keyframes ring-pulse {
+  0% {
+    transform: scale(0.92);
+    opacity: 0.5;
+  }
+  70% {
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.22);
+    opacity: 0;
+  }
+}
+
+@keyframes wave {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+:root {
+  color-scheme: dark;
+  --background: #05080f;
+  --foreground: #e2e8f0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
 body {
-  background: var(--background);
+  min-height: 100%;
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-image:
+    radial-gradient(
+      ellipse 80% 55% at 50% -10%,
+      rgba(124, 108, 255, 0.16),
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 60% 45% at 90% 10%,
+      rgba(34, 211, 238, 0.08),
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 50% 40% at 0% 30%,
+      rgba(99, 80, 245, 0.08),
+      transparent 70%
+    );
+  background-attachment: fixed;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: rgba(124, 108, 255, 0.35);
+  color: #ffffff;
+}
+
+/* Slim, theme-matched scrollbars for the conversation workspace. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 163, 184, 0.28);
+  border-radius: 9999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(148, 163, 184, 0.45);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .animate-orb-breathe,
+  .animate-ring-pulse,
+  .animate-wave,
+  .animate-fade-up,
+  .animate-spin-slow {
+    animation: none !important;
+  }
 }

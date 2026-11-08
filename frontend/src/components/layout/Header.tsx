@@ -1,4 +1,43 @@
+import { ArrowUpRight, AudioLines } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { VOICE_API_URL } from "@/lib/voice";
+
+const NAV_ITEMS = [
+  { label: "Console", href: "#console" },
+  { label: "Conversation", href: "#conversation" },
+  { label: "Insights", href: "#insights" },
+];
+
+function StatusChip({
+  tone,
+  label,
+  dotClassName,
+  className,
+}: {
+  tone: "positive" | "negative" | "neutral";
+  label: string;
+  dotClassName: string;
+  className?: string;
+}) {
+  const tones = {
+    positive: "border-emerald-400/25 bg-emerald-400/10 text-emerald-300",
+    negative: "border-red-400/25 bg-red-400/10 text-red-300",
+    neutral: "border-white/10 bg-white/[0.04] text-slate-400",
+  };
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold whitespace-nowrap",
+        tones[tone],
+        className,
+      )}
+    >
+      <span className={cn("h-1.5 w-1.5 rounded-full", dotClassName)} />
+      {label}
+    </span>
+  );
+}
 
 export function Header({
   demoReady,
@@ -12,80 +51,96 @@ export function Header({
   return (
     <header
       className={cn(
-        "sticky top-0 z-40 border-b border-neutral-200/70 bg-white/80 backdrop-blur-xl dark:border-neutral-800/70 dark:bg-neutral-900/70",
+        "sticky top-0 z-40 border-b border-white/[0.07] bg-ink-950/85 backdrop-blur-xl",
         className,
       )}
     >
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:h-20 sm:px-8">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-cyan-500 shadow-lg shadow-brand-500/20">
-            <svg
-              className="h-5 w-5 text-white"
-              viewBox="0 0 24 24"
-              fill="none"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="2" />
-              <path
-                d="M12 2v3m0 14v3M2 12h3m14 0h3M4.22 4.22l2.12 2.12m7.78 7.78l2.12 2.12M18.72 4.22L20.84 6.34M6.34 18.72l2.12 2.12"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </div>
-          <div>
-            <h1 className="text-base font-semibold tracking-tight text-neutral-900 dark:text-white">
+      <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+        <a
+          href="#console"
+          className="flex shrink-0 items-center gap-2.5 rounded-lg focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-950 focus-visible:outline-none"
+          aria-label="AI Voice Studio home"
+        >
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-cyan-500 shadow-lg shadow-brand-700/30">
+            <AudioLines className="h-5 w-5 text-white" aria-hidden="true" />
+          </span>
+          <span className="flex flex-col leading-tight whitespace-nowrap">
+            <span className="text-sm font-semibold tracking-tight text-white sm:text-base">
               AI Voice Studio
-            </h1>
-            <p className="hidden text-xs font-medium tracking-wide text-neutral-500 sm:block dark:text-neutral-400">
-              Live Conversational AI Demo
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 sm:gap-3">
-          <span
-            className={cn(
-              "hidden items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition sm:inline-flex",
-              demoReady
-                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-400"
-                : "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400",
-            )}
-          >
-            <span
-              className={cn(
-                "relative h-2 w-2 rounded-full",
-                demoReady
-                  ? "bg-emerald-500 shadow-sm shadow-emerald-500/60"
-                  : "bg-amber-500",
-              )}
-            />
-            {demoReady ? "Live Demo Ready" : "Beta"}
+            </span>
+            <span className="hidden text-[11px] font-medium tracking-wide text-slate-400 sm:block">
+              Conversational AI voice agent
+            </span>
           </span>
+        </a>
 
-          <span
-            className={cn(
-              "flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold sm:px-3",
-              connectivity
-                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-400"
-                : "bg-red-100 text-red-800 dark:bg-red-500/15 dark:text-red-400",
-            )}
+        <nav
+          aria-label="Primary"
+          className="hidden items-center gap-1 md:flex"
+        >
+          {NAV_ITEMS.map((item) => (
+            <a
+              key={item.href}
+              href={item.href}
+              className="rounded-lg px-2.5 py-2 text-sm font-medium whitespace-nowrap text-slate-400 transition-colors hover:bg-white/[0.05] hover:text-slate-100 focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:outline-none"
+            >
+              {item.label}
+            </a>
+          ))}
+          <a
+            href={`${VOICE_API_URL}/docs`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 text-sm font-medium whitespace-nowrap text-slate-400 transition-colors hover:bg-white/[0.05] hover:text-slate-100 focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:outline-none"
           >
-            <span
-              className={cn(
-                "relative h-2 w-2 rounded-full",
-                connectivity ? "bg-emerald-500" : "bg-red-500",
-              )}
-            />
-            {connectivity ? "Backend Online" : "Offline"}
-          </span>
+            API Docs
+            <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </a>
+        </nav>
+
+        <div className="flex items-center gap-2">
+          <StatusChip
+            className="hidden lg:inline-flex"
+            tone={demoReady ? "positive" : "neutral"}
+            label={demoReady ? "Live Demo Ready" : "Setup Required"}
+            dotClassName={demoReady ? "bg-emerald-400" : "bg-slate-500"}
+          />
+          <StatusChip
+            tone={connectivity ? "positive" : "negative"}
+            label={connectivity ? "Backend Online" : "Backend Offline"}
+            dotClassName={connectivity ? "bg-emerald-400" : "bg-red-400"}
+          />
         </div>
       </div>
 
-      <div className="flex h-1 overflow-hidden rounded-full bg-neutral-100 dark:bg-neutral-800/80">
-        <div className="h-full rounded-full bg-gradient-to-r from-brand-500 via-cyan-400 to-brand-500" />
-      </div>
+      {/* Mobile navigation keeps every destination reachable without a menu. */}
+      <nav
+        aria-label="Mobile"
+        className="mx-auto flex w-full max-w-7xl gap-2 overflow-x-auto px-4 pb-3 sm:px-6 md:hidden"
+      >
+        {NAV_ITEMS.map((item) => (
+          <a
+            key={item.href}
+            href={item.href}
+            className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/[0.08] focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:outline-none"
+          >
+            {item.label}
+          </a>
+        ))}
+        <a
+          href={`${VOICE_API_URL}/docs`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/[0.08] focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:outline-none"
+        >
+          API Docs
+        </a>
+      </nav>
+
+      <div
+        aria-hidden="true"
+        className="h-px w-full bg-gradient-to-r from-transparent via-brand-500/40 to-transparent"
+      />
     </header>
   );
 }

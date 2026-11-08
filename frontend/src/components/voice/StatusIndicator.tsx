@@ -1,8 +1,52 @@
-import { Loader2, Mic, PhoneOff, Sparkles } from "lucide-react";
+import { Loader2, Mic, PhoneOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { VoiceState } from "./VoiceOrb";
 
-export type CallStatus = "idle" | "listening" | "thinking" | "speaking" | "stopped";
-export type VoiceState = "idle" | "listening" | "processing" | "speaking" | "stopped";
+export type CallStatus =
+  | "idle"
+  | "listening"
+  | "thinking"
+  | "speaking"
+  | "stopped";
+
+const STATUS_META: Record<
+  CallStatus,
+  { label: string; dot: string; pill: string }
+> = {
+  idle: {
+    label: "Ready",
+    dot: "bg-slate-400",
+    pill: "border-white/10 bg-white/[0.04] text-slate-300",
+  },
+  listening: {
+    label: "Listening",
+    dot: "bg-cyan-400",
+    pill: "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
+  },
+  thinking: {
+    label: "Thinking",
+    dot: "bg-violet-400",
+    pill: "border-violet-400/30 bg-violet-400/10 text-violet-200",
+  },
+  speaking: {
+    label: "Speaking",
+    dot: "bg-fuchsia-400",
+    pill: "border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-200",
+  },
+  stopped: {
+    label: "Call ended",
+    dot: "bg-slate-500",
+    pill: "border-white/10 bg-white/[0.03] text-slate-400",
+  },
+};
+
+const STATE_DETAIL: Record<VoiceState, string> = {
+  idle: "Microphone is off",
+  listening: "Recording your voice",
+  processing: "Generating a reply",
+  speaking: "Playing the reply",
+  stopped: "Microphone released",
+};
 
 export function StatusIndicator({
   status,
@@ -19,101 +63,77 @@ export function StatusIndicator({
   onEnd: () => void;
   disabled?: boolean;
 }) {
+  const meta = STATUS_META[status];
+
   return (
-    <div className="flex flex-col items-center gap-3 py-4">
-      <button
-        type="button"
-        onClick={callActive ? onEnd : onStart}
-        disabled={disabled}
-        aria-label={callActive ? "End call" : "Start call"}
+    <div className="flex w-full flex-col items-center gap-5">
+      <div
         className={cn(
-          "group relative flex h-24 w-24 items-center justify-center rounded-full transition-all duration-300 focus-visible:outline-2 focus-visible:outline-offset-2",
-          callActive
-            ? "bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/30 hover:shadow-red-500/40"
-            : voiceState === "speaking"
-              ? "bg-gradient-to-br from-brand-500 to-cyan-500 text-white hover:scale-105 shadow-lg shadow-brand-500/30"
-              : voiceState === "listening"
-                ? "bg-gradient-to-br from-sky-500 to-cyan-400 text-white hover:scale-105 shadow-lg shadow-sky-500/30"
-                : "bg-gradient-to-br from-neutral-200 to-neutral-300 text-neutral-600 hover:scale-105 hover:from-neutral-300 hover:to-neutral-400 shadow-md shadow-neutral-200 dark:shadow-black/30",
-          disabled && "pointer-events-none opacity-50",
+          "inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs font-semibold tracking-wide",
+          meta.pill,
         )}
       >
-        <span className="relative">
-          {status === "thinking" ? (
-            <Loader2 className="h-8 w-8 animate-spin" aria-hidden="true" />
-          ) : callActive ? (
-            <PhoneOff className="h-8 w-8" aria-hidden="true" />
-          ) : (
-            <Mic className="h-8 w-8" aria-hidden="true" />
+        <span className="relative flex h-2 w-2">
+          {callActive && (
+            <span
+              className={cn(
+                "absolute inline-flex h-full w-full animate-ping rounded-full opacity-60",
+                meta.dot,
+              )}
+            />
           )}
           <span
-            className={cn(
-              "absolute inset-0 rounded-full pointer-events-none",
-              callActive
-                ? "bg-red-500/20"
-                : voiceState === "speaking"
-                  ? "bg-brand-500/20"
-                  : voiceState === "listening"
-                    ? "bg-sky-500/20"
-                    : "bg-neutral-300/40 dark:bg-neutral-600/40",
-            )}
+            className={cn("relative inline-flex h-2 w-2 rounded-full", meta.dot)}
           />
         </span>
-      </button>
-
-      <div className="flex items-center gap-2">
-        <span
-          className={cn(
-            "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold",
-            status === "listening"
-              ? "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300"
-              : status === "thinking"
-                ? "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300"
-                : status === "speaking"
-                  ? "bg-brand-100 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300"
-                  : "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400",
-          )}
-        >
-          {callActive ? (
-            <>
-              <span
-                className={cn(
-                  "h-1.5 w-1.5 rounded-full",
-                  status === "speaking"
-                    ? "bg-brand-500"
-                    : status === "listening"
-                      ? "bg-sky-500"
-                      : "bg-neutral-400",
-                )}
-              />
-              {status === "listening"
-                ? "Listening…"
-                : status === "thinking"
-                  ? "Thinking…"
-                  : status === "speaking"
-                    ? "Speaking…"
-                    : "Available"}
-            </>
-          ) : (
-            <>
-              <Sparkles className="h-3 w-3" aria-hidden="true" />
-              AI Voice Studio
-            </>
-          )}
+        {meta.label}
+        <span className="font-normal opacity-40" aria-hidden="true">
+          ·
         </span>
-        {callActive && (
-          <span
-            className="text-xs text-neutral-400 dark:text-neutral-500"
-            role="status"
-            aria-live="polite"
+        <span className="font-normal opacity-70">{STATE_DETAIL[voiceState]}</span>
+      </div>
+
+      <div className="flex w-full flex-col items-center gap-3 sm:flex-row sm:justify-center">
+        {callActive ? (
+          <button
+            type="button"
+            onClick={onEnd}
+            disabled={disabled}
+            className={cn(
+              "inline-flex w-full items-center justify-center gap-2 rounded-xl border border-red-400/30 bg-red-500/15 px-6 py-3 text-sm font-semibold text-red-200",
+              "transition-colors hover:border-red-400/50 hover:bg-red-500/25",
+              "focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-900 focus-visible:outline-none",
+              "disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto",
+            )}
           >
-            {voiceState === "listening" && "Recording…"}
-            {voiceState === "processing" && "Working on your reply…"}
-            {voiceState === "speaking" && "Playing response…"}
-            {voiceState === "stopped" && "Connection ended"}
-          </span>
+            {status === "thinking" ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <PhoneOff className="h-4 w-4" aria-hidden="true" />
+            )}
+            End Call
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onStart}
+            disabled={disabled}
+            className={cn(
+              "inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-cyan-500 px-6 py-3 text-sm font-semibold text-white",
+              "shadow-lg shadow-brand-700/30 transition-all hover:brightness-110 active:scale-[0.99]",
+              "focus-visible:ring-2 focus-visible:ring-brand-300 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-900 focus-visible:outline-none",
+              "disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto",
+            )}
+          >
+            <Mic className="h-4 w-4" aria-hidden="true" />
+            Start Call
+          </button>
         )}
       </div>
+
+      <p role="status" aria-live="polite" className="sr-only">
+        {meta.label}. {STATE_DETAIL[voiceState]}.
+      </p>
     </div>
   );
 }

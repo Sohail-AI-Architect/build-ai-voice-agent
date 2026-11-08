@@ -1,82 +1,188 @@
-import { Loader2, Mic, PhoneOff, Sparkles } from "lucide-react";
+import { Loader2, Mic, PhoneOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type VoiceState = "idle" | "listening" | "processing" | "speaking" | "stopped";
+export type VoiceState =
+  | "idle"
+  | "listening"
+  | "processing"
+  | "speaking"
+  | "stopped";
+
+type OrbTone = {
+  core: string;
+  glow: string;
+  ring: string;
+  icon: string;
+  label: string;
+};
+
+const TONES: Record<VoiceState, OrbTone> = {
+  idle: {
+    core: "from-[#26305c] via-[#1a2342] to-[#0c1224]",
+    glow: "bg-brand-500/30",
+    ring: "border-brand-300/20",
+    icon: "text-brand-300",
+    label: "Ready when you are",
+  },
+  listening: {
+    core: "from-sky-500 via-blue-500 to-cyan-400",
+    glow: "bg-cyan-400/35",
+    ring: "border-cyan-300/30",
+    icon: "text-white",
+    label: "Listening",
+  },
+  processing: {
+    core: "from-violet-500 via-brand-500 to-indigo-500",
+    glow: "bg-violet-500/35",
+    ring: "border-violet-300/30",
+    icon: "text-white",
+    label: "Processing",
+  },
+  speaking: {
+    core: "from-fuchsia-500 via-violet-500 to-cyan-400",
+    glow: "bg-fuchsia-500/35",
+    ring: "border-fuchsia-300/30",
+    icon: "text-white",
+    label: "Speaking",
+  },
+  stopped: {
+    core: "from-slate-700 via-slate-800 to-slate-900",
+    glow: "bg-slate-500/10",
+    ring: "border-white/10",
+    icon: "text-slate-400",
+    label: "Call ended",
+  },
+};
+
+function Waveform({ className }: { className?: string }) {
+  const heights = [10, 20, 32, 22, 14, 26, 12];
+  return (
+    <span
+      className={cn("flex items-center gap-1.5", className)}
+      aria-hidden="true"
+    >
+      {heights.map((height, index) => (
+        <span
+          key={index}
+          className="animate-wave w-1.5 origin-center rounded-full bg-white/90"
+          style={{
+            height: `${height}px`,
+            animationDelay: `${index * 0.11}s`,
+          }}
+        />
+      ))}
+    </span>
+  );
+}
 
 export function VoiceOrb({
   state,
-  hint,
+  callActive,
+  onToggle,
+  disabled,
   className,
 }: {
   state: VoiceState;
-  hint?: string;
+  callActive: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
   className?: string;
 }) {
+  const tone = TONES[state];
+
   return (
-    <div
-      className={cn(
-        "relative flex h-24 w-24 items-center justify-center",
-        className,
-      )}
-      role="presentation"
-    >
-      <div
+    <div className={cn("relative flex items-center justify-center", className)}>
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        aria-pressed={callActive}
+        aria-label={callActive ? "End voice call" : "Start voice call"}
         className={cn(
-          "relative flex h-full w-full items-center justify-center rounded-full",
-          state === "speaking"
-            ? "bg-gradient-to-br from-brand-500 to-cyan-500 shadow-2xl shadow-brand-500/30"
-            : state === "processing"
-              ? "bg-gradient-to-br from-amber-500 to-orange-400 shadow-2xl shadow-amber-500/30"
-              : state === "listening"
-                ? "bg-gradient-to-br from-sky-500 to-cyan-400 shadow-2xl shadow-sky-500/30"
-                : state === "stopped"
-                  ? "bg-gradient-to-br from-neutral-400 to-neutral-500"
-                  : "bg-gradient-to-br from-neutral-200 to-neutral-300",
+          "group relative flex h-44 w-44 shrink-0 items-center justify-center rounded-full",
+          "transition-transform duration-300 ease-out hover:scale-[1.02] active:scale-[0.99]",
+          "focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-4 focus-visible:ring-offset-ink-900 focus-visible:outline-none",
+          "disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100",
+          "sm:h-52 sm:w-52",
         )}
       >
-        <Sparkles
-          className={cn(
-            "absolute inset-0 m-auto h-7 w-7 drop-shadow-sm",
-            state === "speaking"
-              ? "text-white"
-              : state === "listening"
-                ? "text-white"
-                : state === "processing"
-                  ? "text-amber-50"
-                  : "text-neutral-600",
-          )}
+        {/* Ambient glow */}
+        <span
           aria-hidden="true"
+          className={cn(
+            "absolute inset-2 rounded-full blur-2xl transition-colors duration-500",
+            tone.glow,
+            state === "idle" && "animate-orb-breathe",
+            state === "speaking" && "animate-orb-breathe",
+          )}
         />
 
-        {(state === "speaking" || state === "processing") && (
-          <span className="absolute inset-0 m-auto flex items-center justify-center">
-            <Loader2 className="h-5 w-5 animate-spin text-white/80" aria-hidden="true" />
-          </span>
-        )}
-
+        {/* Listening pulse rings — drawn outside the core so nothing overlaps */}
         {state === "listening" && (
-          <Mic className="absolute inset-0 m-auto h-6 w-6 text-white drop-shadow-sm" aria-hidden="true" />
+          <>
+            <span
+              aria-hidden="true"
+              className="animate-ring-pulse absolute inset-0 rounded-full border border-cyan-300/50"
+            />
+            <span
+              aria-hidden="true"
+              className="animate-ring-pulse absolute inset-0 rounded-full border border-cyan-300/30"
+              style={{ animationDelay: "1.4s" }}
+            />
+          </>
         )}
 
-        {state === "stopped" && (
-          <PhoneOff className="absolute inset-0 m-auto h-6 w-6 text-neutral-500" aria-hidden="true" />
-        )}
-      </div>
+        {/* Outer ring */}
+        <span
+          aria-hidden="true"
+          className={cn(
+            "absolute inset-0 rounded-full border bg-ink-900/40 backdrop-blur-sm transition-colors duration-500",
+            tone.ring,
+          )}
+        />
+        <span
+          aria-hidden="true"
+          className="absolute inset-3 rounded-full border border-white/[0.06]"
+        />
 
-      <div
-        className={cn(
-          "absolute -bottom-2 left-1/2 -translate-x-1/2 rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-widest",
-          state === "speaking"
-            ? "bg-brand-500/15 text-brand-700 dark:text-brand-300"
-            : state === "processing"
-              ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
-              : state === "listening"
-                ? "bg-sky-500/15 text-sky-700 dark:text-sky-300"
-                : "bg-neutral-200/60 text-neutral-600 dark:bg-neutral-700/30 dark:text-neutral-400",
+        {/* Processing sweep */}
+        {state === "processing" && (
+          <span
+            aria-hidden="true"
+            className="animate-spin-slow absolute inset-0 rounded-full border-2 border-transparent border-t-violet-300/80 border-r-violet-300/30"
+          />
         )}
-      >
-        {hint ?? "AI Voice Studio"}
-      </div>
+
+        {/* Core */}
+        <span
+          className={cn(
+            "relative flex h-[calc(100%-1.5rem)] w-[calc(100%-1.5rem)] items-center justify-center rounded-full",
+            "bg-gradient-to-br shadow-[0_20px_60px_-15px_rgba(0,0,0,0.9)]",
+            "ring-1 ring-white/10 transition-colors duration-500",
+            tone.core,
+          )}
+        >
+          <span
+            aria-hidden="true"
+            className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_25%,rgba(255,255,255,0.28),transparent_55%)]"
+          />
+
+          <span className={cn("relative", tone.icon)}>
+            {state === "speaking" ? (
+              <Waveform />
+            ) : state === "processing" ? (
+              <Loader2 className="h-10 w-10 animate-spin" aria-hidden="true" />
+            ) : state === "stopped" ? (
+              <PhoneOff className="h-10 w-10" aria-hidden="true" />
+            ) : (
+              <Mic
+                className="h-10 w-10 drop-shadow-sm sm:h-11 sm:w-11"
+                aria-hidden="true"
+              />
+            )}
+          </span>
+        </span>
+      </button>
     </div>
   );
 }
