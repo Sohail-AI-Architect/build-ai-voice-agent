@@ -28,6 +28,25 @@ function formatClock(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+// Long hostnames break after dots instead of mid-word.
+function HostValue({ host }: { host: string }) {
+  const parts = host.split(".");
+  return (
+    <>
+      {parts.map((part, index) => (
+        <span key={`${part}-${index}`}>
+          {part}
+          {index < parts.length - 1 && (
+            <>
+              .<wbr />
+            </>
+          )}
+        </span>
+      ))}
+    </>
+  );
+}
+
 function StatusChip({
   tone,
   children,
@@ -80,7 +99,7 @@ export function BackendConnectionCard({
           value={latencyMs === null ? "Not measured" : `${latencyMs} ms`}
           tone={latencyMs === null ? "muted" : "positive"}
         />
-        <MetricRow label="Endpoint" value={host} mono />
+        <MetricRow label="Endpoint" value={<HostValue host={host} />} mono wrap stack />
         <MetricRow
           label="Warnings"
           value={warningCount === 0 ? "None" : String(warningCount)}
@@ -224,7 +243,7 @@ export function SessionInfoCard({
           mono
         />
         <MetricRow label="Turns this session" value={String(turns)} />
-        <MetricRow label="API host" value={host} mono />
+        <MetricRow label="API host" value={<HostValue host={host} />} mono wrap />
       </dl>
     </DataCard>
   );

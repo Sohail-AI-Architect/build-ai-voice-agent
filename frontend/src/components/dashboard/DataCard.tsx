@@ -55,11 +55,15 @@ export function MetricRow({
   label,
   value,
   mono,
+  wrap,
+  stack,
   tone = "default",
 }: {
   label: string;
   value: ReactNode;
   mono?: boolean;
+  wrap?: boolean;
+  stack?: boolean;
   tone?: "default" | "positive" | "warning" | "muted";
 }) {
   const toneClass =
@@ -72,11 +76,18 @@ export function MetricRow({
           : "text-slate-200";
 
   return (
-    <div className="flex items-baseline justify-between gap-3 py-1">
+    <div
+      className={cn(
+        "py-1",
+        stack ? "flex flex-col gap-0.5" : "flex items-baseline justify-between gap-3",
+      )}
+    >
       <dt className="shrink-0 text-xs text-slate-400">{label}</dt>
       <dd
         className={cn(
-          "min-w-0 truncate text-right text-xs font-medium",
+          "min-w-0 text-xs font-medium",
+          stack ? "text-left" : "text-right",
+          !stack && (wrap ? "whitespace-normal" : "truncate"),
           toneClass,
           mono && "font-mono text-[11px]",
         )}
