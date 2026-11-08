@@ -1,36 +1,43 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI Voice Agent — Frontend
 
-## Getting Started
+Concise frontend-only guide for the voice demo UI.
 
-First, run the development server:
+## Quick start
 
 ```bash
+cd frontend
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open <http://localhost:3000>. No environment file is required: `src/lib/voice.ts` falls back to the production backend at `https://backend-three-neon-55.vercel.app`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+This project does **not** ship a `frontend/.env.example`, so there is no template to copy. If you need to point at a different backend, create `frontend/.env.local` yourself (it is git-ignored) and set `NEXT_PUBLIC_BACKEND_URL`:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+NEXT_PUBLIC_BACKEND_URL=https://backend-three-neon-55.vercel.app
+```
 
-## Learn More
+`NEXT_PUBLIC_BACKEND_URL` is optional — leave it unset to use the production backend default. The frontend builds its voice URL with the exact pattern used in `src/lib/voice.ts` (`BACKEND_URL` + `/api/voice/stream`).
 
-To learn more about Next.js, take a look at the following resources:
+## What you get
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- **Live voice console** — tap the mic, speak, hear the agent reply and see the transcript.
+- **Page composition** — `frontend/src/app/page.tsx` renders exactly four components plus a mode selector:
+  - `components/layout/Header.tsx` — branding, a Live Demo badge, and a Backend Online / Offline badge.
+  - `components/voice/VoiceOrb.tsx` — a 96 px state orb (idle, listening, processing, speaking, stopped) with a short hint label.
+  - `components/voice/StatusIndicator.tsx` — the start/end call button and the mic turn-status chip.
+  - `components/voice/ConversationPanel.tsx` — the ordered conversation transcript.
+  - A mode selector that currently offers only the `assistant` option.
+- **Status signals** — Live Demo and Backend Online / Offline live in the header; listening / processing / speaking / ended turn states live under the call button.
+- **Voice engine** — MediaRecorder, VAD/silence detection, max turn length, audio conversion and base64 upload, NDJSON reader, playback queue, and browser `speechSynthesis` fallback.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The page does not have a hero, features section, how-it-works section, or footer.
 
-## Deploy on Vercel
+## Testing
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npm run lint
+npx tsc --noEmit
+npm run build
+```

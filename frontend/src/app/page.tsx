@@ -1,13 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, Bell, Loader2, Mic, PhoneOff, X } from "lucide-react";
+import { AlertTriangle, Bell, X } from "lucide-react";
 import {
   ApiError,
   VOICE_API_URL,
   health,
   ttsFallbackInfo,
 } from "@/lib/voice";
+
+import { Header } from "@/components/layout/Header";
+import { VoiceOrb } from "@/components/voice/VoiceOrb";
+import { ConversationPanel } from "@/components/voice/ConversationPanel";
+import { StatusIndicator } from "@/components/voice/StatusIndicator";
 
 /** Runs only in the browser. Kept in a client component so SSR never sees it. */
 function isBrowser(): boolean {
@@ -16,7 +21,7 @@ function isBrowser(): boolean {
 type CallStatus = "idle" | "listening" | "thinking" | "speaking" | "stopped";
 
 // Track which status the voice orb shows (independent of the legacy call status).
-type VoiceState = "idle" | "listening" | "speaking" | "stopped";
+type VoiceState = "idle" | "listening" | "processing" | "speaking" | "stopped";
 
 type HistoryEntry = { role: "user" | "agent"; content: string };
 
@@ -61,14 +66,6 @@ const STATUS_LABEL: Record<CallStatus, string> = {
   stopped: "Call ended",
 };
 
-const ORB_TONE: Record<VoiceState, string> = {
-  idle: "bg-neutral-200 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-100",
-  listening: "bg-sky-500 text-white shadow-[0_0_0_14px_rgba(14,165,233,0.15)]",
-  speaking:
-    "bg-violet-500 text-white shadow-[0_0_0_14px_rgba(139,92,246,0.15)]",
-  stopped:
-    "bg-neutral-300 text-neutral-700 shadow-none dark:bg-neutral-700 dark:text-neutral-100",
-};
 
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
@@ -124,9 +121,10 @@ export default function Home() {
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [transcript, setTranscript] = useState("");
   const [reply, setReply] = useState("");
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [mode, setMode] = useState("assistant");
   const [ttsReady, setTtsReady] = useState<boolean | null>(null);
-  const modeLabel = "Assistant";
+  const [backendOnline, setBackendOnline] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -600,6 +598,7 @@ export default function Home() {
     setCallActive(true);
     setTranscript("");
     setReply("");
+    setHistory([]);
 
     // Unlock here, inside the tap, so every later reply can auto-play.
     await unlockAudio();
@@ -632,6 +631,7 @@ export default function Home() {
         if (!blob) continue; // silence / tap-to-cancel: keep listening
 
         setStatus("thinking");
+        setVoiceState("processing");
         setError(null);
 
         try {
@@ -642,6 +642,7 @@ export default function Home() {
           if (turn.reply) {
             conversation.push({ role: "agent", content: turn.reply });
           }
+          setHistory([...conversation]);
         } catch (e) {
           console.error("[voice] Voice turn failed", e);
           setError(errorMessage(e));
@@ -686,11 +687,13 @@ export default function Home() {
       try {
         const [report, info] = await Promise.all([health(), ttsFallbackInfo()]);
         if (cancelled) return;
+        setBackendOnline(true);
         setTtsReady(Boolean(report.elevenlabs_configured && info.has_key));
         const warnings = report.warnings ?? [];
         if (warnings.length > 0) setWarning(warnings[0]);
       } catch (e) {
         console.error("[voice] Health check failed", e);
+        setBackendOnline(false);
       }
     })();
     return () => {
@@ -708,111 +711,100 @@ export default function Home() {
     };
   }, [releaseMedia, stopAudio]);
 
+  // Real, ordered conversation for the panel: all completed turns plus the
+  // turn that is currently being processed.
+  const inFlight = status === "thinking" || status === "speaking";
+  const conversationEntries: { speaker: "user" | "agent"; text: string }[] = [
+    ...history.map((entry) => ({ speaker: entry.role, text: entry.content })),
+    ...(inFlight && transcript
+      ? [{ speaker: "user" as const, text: transcript }]
+      : []),
+    ...(inFlight && reply ? [{ speaker: "agent" as const, text: reply }] : []),
+  ];
+
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-6 py-10">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Voice Agent</h1>
-          <p className="mt-1 text-sm text-neutral-500">
-            Speak naturally — the agent listens, replies and speaks back.
-          </p>
-        </div>
-      </header>
+    <div className="flex min-h-full flex-col bg-neutral-50 dark:bg-neutral-950">
+      <Header
+        demoReady={ttsReady === true}
+        connectivity={backendOnline}
+      />
 
-      {error && (
-        <div
-          role="alert"
-          className="flex items-start gap-3 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
-        >
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <p className="flex-1">{error}</p>
-          <button
-            type="button"
-            onClick={() => setError(null)}
-            aria-label="Dismiss error"
-            className="rounded p-0.5 hover:bg-red-500/10"
+      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-5 px-4 py-8 sm:gap-6 sm:px-6 sm:py-10">
+        {error && (
+          <div
+            role="alert"
+            className="flex items-start gap-3 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
           >
-            <X className="h-4 w-4" aria-hidden />
-          </button>
-        </div>
-      )}
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <p className="flex-1">{error}</p>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              aria-label="Dismiss error"
+              className="rounded p-0.5 hover:bg-red-500/10"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </button>
+          </div>
+        )}
 
-      {warning && (
-        <div
-          role="status"
-          className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
-        >
-          <Bell className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <p className="flex-1">{warning}</p>
-          <button
-            type="button"
-            onClick={() => setWarning(null)}
-            aria-label="Dismiss warning"
-            className="rounded p-0.5 hover:bg-amber-500/10"
+        {warning && (
+          <div
+            role="status"
+            className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
           >
-            <X className="h-4 w-4" aria-hidden />
-          </button>
-        </div>
-      )}
+            <Bell className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <p className="flex-1">{warning}</p>
+            <button
+              type="button"
+              onClick={() => setWarning(null)}
+              aria-label="Dismiss warning"
+              className="rounded p-0.5 hover:bg-amber-500/10"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </button>
+          </div>
+        )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        {["assistant"].map((option) => (
-          <button
-            key={option}
-            type="button"
-            onClick={() => setMode(option)}
-            disabled={callActive}
-            aria-pressed={mode === option}
-            className={`rounded-full border px-3 py-1.5 text-sm capitalize transition disabled:opacity-50 ${
-              mode === option
-                ? "border-neutral-900 bg-neutral-900 text-white dark:border-white dark:bg-white dark:text-neutral-900"
-                : "border-neutral-300 text-neutral-600 hover:border-neutral-400 dark:border-neutral-700 dark:text-neutral-300"
-            }`}
-          >
-            {option}
-          </button>
-        ))}
-      </div>
+        <section className="flex flex-col items-center gap-4 rounded-2xl border border-neutral-200 bg-white/70 px-4 py-6 dark:border-neutral-800 dark:bg-neutral-900/60">
+          <VoiceOrb
+            state={voiceState}
+            hint={callActive ? STATUS_LABEL[status] : "Tap to start"}
+          />
+          <StatusIndicator
+            status={status}
+            voiceState={voiceState}
+            callActive={callActive}
+            onStart={() => void startCall()}
+            onEnd={endCall}
+          />
+        </section>
 
-      <div className="flex flex-col items-center gap-3 py-4">
-        <button
-          type="button"
-          onClick={callActive ? endCall : () => void startCall()}
-          aria-label={callActive ? "End call" : "Start call"}
-          className={`flex h-24 w-24 items-center justify-center rounded-full transition-transform hover:scale-105 ${ORB_TONE[voiceState]}`}
-        >
-          {status === "thinking" ? (
-            <Loader2 className="h-8 w-8 animate-spin" aria-hidden />
-          ) : callActive ? (
-            <PhoneOff className="h-8 w-8" aria-hidden />
-          ) : (
-            <Mic className="h-8 w-8" aria-hidden />
-          )}
-        </button>
-        <p className="text-sm font-medium text-neutral-600 dark:text-neutral-300">
-          {STATUS_LABEL[status]}
-        </p>
-      </div>
+        <ConversationPanel
+          entries={conversationEntries}
+          className="max-h-80 min-h-40 rounded-2xl border border-neutral-200 bg-white/70 dark:border-neutral-800 dark:bg-neutral-900/60"
+        />
 
-      <section className="grid gap-3">
-        <div className="rounded-2xl border border-neutral-200 bg-white/70 p-4 dark:border-neutral-800 dark:bg-neutral-900/60">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
-            You said
-          </h2>
-          <p className="mt-1 min-h-6 text-sm text-neutral-800 dark:text-neutral-100">
-            {transcript || "—"}
-          </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {["assistant"].map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => setMode(option)}
+              disabled={callActive}
+              aria-pressed={mode === option}
+              className={`rounded-full border px-3 py-1.5 text-sm capitalize transition disabled:opacity-50 ${
+                mode === option
+                  ? "border-neutral-900 bg-neutral-900 text-white dark:border-white dark:bg-white dark:text-neutral-900"
+                  : "border-neutral-300 text-neutral-600 hover:border-neutral-400 dark:border-neutral-700 dark:text-neutral-300"
+              }`}
+            >
+              {option}
+            </button>
+          ))}
         </div>
 
-        <div className="rounded-2xl border border-neutral-200 bg-white/70 p-4 dark:border-neutral-800 dark:bg-neutral-900/60">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
-            Agent
-          </h2>
-          <p className="mt-1 min-h-6 text-sm text-neutral-800 dark:text-neutral-100">
-            {reply || "—"}
-          </p>
-        </div>
-      </section>
-    </main>
+      </main>
+    </div>
   );
 }
