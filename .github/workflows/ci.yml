@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run frontend TypeScript check
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Run frontend build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Validate Python syntax
+        working-directory: backend
+        run: python -m py_compile main.py config.py routes/voice.py services/llm.py services/stt.py services/tts.py services/language_detect.py
+
+      - name: Verify backend import
+        working-directory: backend
+        run: python -c "import main; print('Backend imports successfully')"
